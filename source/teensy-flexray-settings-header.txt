@@ -1,0 +1,179 @@
+#ifndef TEENSY_FLEXRAY_ANALYZER_SETTINGS_H
+#define TEENSY_FLEXRAY_ANALYZER_SETTINGS_H
+
+#include <Arduino.h>
+#include <EEPROM.h>
+
+// Forward declarations
+typedef uint8_t Channel;
+typedef bool BitState;
+
+// Constants
+const uint32_t DEFAULT_FLEXRAY_BITRATE = 10000000;  // 10 Mbps
+const uint32_t MIN_FLEXRAY_BITRATE = 1000000;       // 1 Mbps
+const uint32_t MAX_FLEXRAY_BITRATE = 10000000;      // 10 Mbps
+const uint16_t SETTINGS_MAGIC = 0xFRAY;             // Magic number for settings validation
+
+// Settings storage structure
+struct FlexRaySettingsData {
+    uint16_t magic;           // For validation
+    Channel inputChannel;     // Input pin
+    uint32_t bitRate;        // Bit rate in bps
+    bool inverted;           // Signal inversion flag
+    uint32_t checksum;       // For data integrity
+};
+
+class TeensyFlexRaySettings {
+public:
+    TeensyFlexRaySettings() :
+        mInputChannel(255),  // Invalid channel by default
+        mBitRate(DEFAULT_FLEXRAY_BITRATE),
+        mInverted(false),
+        mSettingsChanged(false) {
+    }
+
+    virtual ~TeensyFlexRaySettings() {
+        if (mSettingsChanged) {
+            SaveSettings();
+        }
+    }
+
+    // Basic setters with validation
+    bool SetInputChannel(Channel channel) {
+        if (channel >= NUM_DIGITAL_PINS) {
+            return false;
+        }
+        if (mInputChannel != channel) {
+            mInputChannel = channel;
+            mSettingsChanged = true;
+        }
+        return true;
+    }
+
+    bool SetBitRate(uint32_t bitRate) {
+        if (bitRate < MIN_FLEXRAY_BITRATE || bitRate > MAX_FLEXRAY_BITRATE) {
+            return false;
+        }
+        if (mBitRate != bitRate) {
+            mBitRate = bitRate;
+            mSettingsChanged = true;
+        }
+        return true;
+    }
+
+    void SetInverted(bool inverted) {
+        if (mInverted != inverted) {
+            mInverted = inverted;
+            mSettingsChanged = true;
+        }
+    }
+
+    // Getters
+    Channel GetInputChannel() const { return mInputChannel; }
+    uint32_t GetBitRate() const { return mBitRate; }
+    bool GetInverted() const { return mInverted; }
+
+    // Bit state helpers
+    BitState Recessive() const { return mInverted ? LOW : HIGH; }
+    BitState Dominant() const { return mInverted ? HIGH : LOW; }
+
+    // Settings persistence
+    bool LoadSettings() {
+        FlexRaySettingsData data;
+        EEPROM.get(0, data);
+
+        // Validate settings
+        if (data.magic != SETTINGS_MAGIC || !ValidateChecksum(data)) {
+            return false;
+        }
+
+        mInputChannel = data.inputChannel;
+        mBitRate = data.bitRate;
+        mInverted = data.inverted;
+        mSettingsChanged = false;
+        return true;
+    }
+
+    bool SaveSettings() {
+        FlexRaySettingsData data;
+        data.magic = SETTINGS_MAGIC;
+        data.inputChannel = mInputChannel;
+        data.bitRate = mBitRate;
+        data.inverted = data.inverted;
+        data.checksum = CalculateChecksum(data);
+
+        EEPROM.put(0, data);
+        mSettingsChanged = false;
+        return true;
+    }
+
+    // Interactive configuration via Serial
+    bool ConfigureViaSerial() {
+        Serial.println(F("\nFlexRay Analyzer Settings"));
+        Serial.println(F("------------------------"));
+
+        // Input Channel
+        Serial.printf("Input Channel (0-%d) [current: %d]: ", NUM_DIGITAL_PINS - 1, mInputChannel);
+        while (!Serial.available()) { delay(1); }
+        int newChannel = Serial.parseInt();
+        if (newChannel >= 0 && newChannel < NUM_DIGITAL_PINS) {
+            SetInputChannel(newChannel);
+        }
+
+        // Bit Rate
+        Serial.printf("Bit Rate (%d-%d) [current: %d]: ", 
+                     MIN_FLEXRAY_BITRATE, MAX_FLEXRAY_BITRATE, mBitRate);
+        while (!Serial.available()) { delay(1); }
+        int32_t newBitRate = Serial.parseInt();
+        if (newBitRate >= MIN_FLEXRAY_BITRATE && newBitRate <= MAX_FLEXRAY_BITRATE) {
+            SetBitRate(newBitRate);
+        }
+
+        // Inversion
+        Serial.printf("Invert Signal (0/1) [current: %d]: ", mInverted);
+        while (!Serial.available()) { delay(1); }
+        int newInverted = Serial.parseInt();
+        if (newInverted == 0 || newInverted == 1) {
+            SetInverted(newInverted == 1);
+        }
+
+        return SaveSettings();
+    }
+
+    // Print current settings
+    void PrintSettings() {
+        Serial.println(F("\nCurrent FlexRay Settings:"));
+        Serial.printf("Input Channel: %d\n", mInputChannel);
+        Serial.printf("Bit Rate: %d bps\n", mBitRate);
+        Serial.printf("Signal Inverted: %s\n", mInverted ? "Yes" : "No");
+    }
+
+    // Validation
+    bool ValidateSettings() const {
+        return mInputChannel < NUM_DIGITAL_PINS &&
+               mBitRate >= MIN_FLEXRAY_BITRATE &&
+               mBitRate <= MAX_FLEXRAY_BITRATE;
+    }
+
+private:
+    Channel mInputChannel;
+    uint32_t mBitRate;
+    bool mInverted;
+    bool mSettingsChanged;
+
+    // Checksum calculation for settings validation
+    uint32_t CalculateChecksum(const FlexRaySettingsData& data) const {
+        uint32_t sum = 0;
+        sum += data.magic;
+        sum += data.inputChannel;
+        sum += data.bitRate;
+        sum += data.inverted ? 1 : 0;
+        return sum;
+    }
+
+    bool ValidateChecksum(const FlexRaySettingsData& data) const {
+        return CalculateChecksum(data) == data.checksum;
+    }
+};
+
+#endif // TEENSY_FLEXRAY_ANALYZER_SETTINGS_H

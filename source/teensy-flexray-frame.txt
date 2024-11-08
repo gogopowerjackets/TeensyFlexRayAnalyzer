@@ -1,0 +1,269 @@
+#ifndef TEENSY_FLEXRAY_FRAME_H
+#define TEENSY_FLEXRAY_FRAME_H
+
+#include <Arduino.h>
+#include <vector>
+#include <array>
+
+// Constants
+constexpr uint8_t TSS_LEN = 4;
+constexpr uint32_t CRC11_INIT = 0x01A;
+constexpr uint32_t CRC11_POLYNOMIAL = 0x385;
+constexpr uint32_t CRC24_INIT = 0xFEDCBA;
+constexpr uint32_t CRC24_POLYNOMIAL = 0x5D6DCB;
+
+// Structure for decoded bits with timing information
+struct DecoderBit {
+    uint64_t start_sample;
+    uint64_t end_sample;
+    bool bit;
+};
+
+// FlexRay frame types
+enum FlexRayFrameType {
+    TSSField,
+    BSSField,
+    FSSSField,
+    FESField,
+    FlagsField,
+    FrameIdField,
+    PayloadLengthField,
+    HeaderCRCField,
+    CycleCountField,
+    DataField,
+    CRCField
+};
+
+// Frame sorting wrapper (for maintaining timing order)
+struct FrameSortingWrapper {
+    Frame f;
+    bool operator<(const FrameSortingWrapper& other) const {
+        return f.mStartingSampleInclusive < other.f.mStartingSampleInclusive;
+    }
+};
+
+class TeensyFlexRayFrame {
+public:
+    TeensyFlexRayFrame() : 
+        frame_id(0),
+        cycle_count(0),
+        payload_preamble(false),
+        null_frame(false),
+        sync_frame(false),
+        startup_frame(false) {
+        data.reserve(256);  // Pre-allocate space for maximum frame size
+    }
+    
+    // Frame generation
+    std::vector<bool> GenerateStream(bool in_dynamic_section = false) {
+        std::vector<bool> result;
+        result.reserve(512);  // Pre-allocate for efficiency
+        
+        // Add Transmission Start Sequence
+        result.insert(result.end(), TSS_LEN, false);
+        
+        // Add Frame Start Sequence
+        result.push_back(true);
+        
+        // Generate raw frame data
+        std::vector<bool> raw_frame_data;
+        raw_frame_data.reserve(256);
+        
+        // Header
+        raw_frame_data.push_back(false);             // Reserved bit
+        raw_frame_data.push_back(payload_preamble);  // Payload preamble
+        raw_frame_data.push_back(null_frame);        // Null frame
+        raw_frame_data.push_back(sync_frame);        // Sync frame
+        raw_frame_data.push_back(startup_frame);     // Startup frame
+        
+        // Frame ID
+        auto frame_id_bits = ToBoolVector(frame_id, 11);
+        raw_frame_data.insert(raw_frame_data.end(), 
+                            frame_id_bits.begin(), 
+                            frame_id_bits.end());
+        
+        // Payload length
+        auto length_bits = ToBoolVector(data.size() / 2, 7);
+        raw_frame_data.insert(raw_frame_data.end(), 
+                            length_bits.begin(), 
+                            length_bits.end());
+        
+        // Header CRC
+        uint16_t header_crc = CalculateCRC(raw_frame_data, CRC11_INIT, CRC11_POLYNOMIAL, 11);
+        auto crc_bits = ToBoolVector(header_crc, 11);
+        raw_frame_data.insert(raw_frame_data.end(), 
+                            crc_bits.begin(), 
+                            crc_bits.end());
+        
+        // Cycle count
+        auto cycle_bits = ToBoolVector(cycle_count, 6);
+        raw_frame_data.insert(raw_frame_data.end(), 
+                            cycle_bits.begin(), 
+                            cycle_bits.end());
+        
+        // Data payload
+        for (const auto& byte : data) {
+            auto byte_bits = ToBoolVector(byte, 8);
+            raw_frame_data.insert(raw_frame_data.end(), 
+                                byte_bits.begin(), 
+                                byte_bits.end());
+        }
+        
+        // Add byte sequence with BSS
+        auto extended = ExtendByteSequence(raw_frame_data);
+        result.insert(result.end(), 
+                     extended.begin(), 
+                     extended.end());
+        
+        // Frame CRC
+        uint32_t frame_crc = CalculateCRC(raw_frame_data, CRC24_INIT, CRC24_POLYNOMIAL, 24);
+        auto frame_crc_bits = ExtendByteSequence(ToBoolVector(frame_crc, 24));
+        result.insert(result.end(), 
+                     frame_crc_bits.begin(), 
+                     frame_crc_bits.end());
+        
+        // Frame End Sequence
+        result.push_back(false);
+        result.push_back(true);
+        
+        // Dynamic segment handling
+        if (in_dynamic_section) {
+            // TODO: Implement dynamic segment handling
+        }
+        
+        return result;
+    }
+    
+    // Frame decoding
+    void Decode(const std::vector<DecoderBit>& bitstream, 
+                std::vector<FrameSortingWrapper>* frames) {
+        size_t i = 0;
+        
+        // Decode flags
+        if (bitstream.size() - i < 5) return;
+        
+        uint64_t start_sample = bitstream[i].start_sample;
+        i++;  // Skip reserved bit
+        payload_preamble = bitstream[i++].bit;
+        null_frame = bitstream[i++].bit;
+        sync_frame = bitstream[i++].bit;
+        startup_frame = bitstream[i++].bit;
+        
+        uint64_t flags = (payload_preamble << 3) | 
+                        (null_frame << 2) | 
+                        (sync_frame << 1) | 
+                        startup_frame;
+                        
+        AddResultFrame(frames, FlagsField, start_sample, 
+                      bitstream[i-1].end_sample, flags);
+        
+        // Decode Frame ID
+        if (bitstream.size() - i < 11) return;
+        
+        start_sample = bitstream[i].start_sample;
+        frame_id = DecodeBits(bitstream, i, 11);
+        i += 11;
+        
+        AddResultFrame(frames, FrameIdField, start_sample + 1,
+                      bitstream[i-1].end_sample, frame_id);
+        
+        // Continue decoding other fields...
+        // (Payload length, Header CRC, Cycle count, Data, Frame CRC)
+        
+        // Process data bytes
+        uint16_t payload_length = DecodeBits(bitstream, i, 7);
+        i += 7;
+        
+        data.clear();
+        for (int k = 0; k < (payload_length * 2); k++) {
+            if (bitstream.size() - i < 8) return;
+            
+            start_sample = bitstream[i].start_sample;
+            uint8_t byte = DecodeBits(bitstream, i, 8);
+            data.push_back(byte);
+            i += 8;
+            
+            AddResultFrame(frames, DataField, start_sample + 1,
+                          bitstream[i-1].end_sample, byte, k);
+        }
+    }
+
+private:
+    uint16_t frame_id;
+    uint8_t cycle_count;
+    bool payload_preamble;
+    bool null_frame;
+    bool sync_frame;
+    bool startup_frame;
+    std::vector<uint8_t> data;
+    
+    // Helper functions
+    std::vector<bool> ToBoolVector(uint64_t value, uint8_t bits) {
+        std::vector<bool> result(bits);
+        for (int i = bits - 1; i >= 0; i--) {
+            result[bits - 1 - i] = (value >> i) & 1;
+        }
+        return result;
+    }
+    
+    std::vector<bool> ExtendByteSequence(const std::vector<bool>& input) {
+        std::vector<bool> result;
+        result.reserve(input.size() * 5 / 4);  // Estimate size with BSS
+        
+        for (size_t i = 0; i < input.size(); i += 8) {
+            // Add BSS
+            result.push_back(true);
+            result.push_back(false);
+            
+            // Add byte
+            for (size_t j = 0; j < 8 && i + j < input.size(); j++) {
+                result.push_back(input[i + j]);
+            }
+        }
+        return result;
+    }
+    
+    uint32_t CalculateCRC(const std::vector<bool>& data, 
+                         uint32_t init, 
+                         uint32_t polynomial, 
+                         uint8_t bits) {
+        uint32_t crc = init;
+        for (bool bit : data) {
+            bool do_xor = (crc >> (bits - 1)) & 1;
+            crc = (crc << 1) | bit;
+            if (do_xor) {
+                crc ^= polynomial;
+            }
+        }
+        return crc & ((1 << bits) - 1);
+    }
+    
+    uint64_t DecodeBits(const std::vector<DecoderBit>& stream, 
+                       size_t start_idx, 
+                       uint8_t num_bits) {
+        uint64_t result = 0;
+        for (uint8_t i = 0; i < num_bits; i++) {
+            result = (result << 1) | stream[start_idx + i].bit;
+        }
+        return result;
+    }
+    
+    void AddResultFrame(std::vector<FrameSortingWrapper>* frames,
+                       FlexRayFrameType type,
+                       int64_t start_sample,
+                       int64_t end_sample,
+                       uint64_t data1,
+                       uint64_t data2 = 0) {
+        Frame frame;
+        frame.mType = type;
+        frame.mData1 = data1;
+        frame.mData2 = data2;
+        frame.mFlags = 0;
+        frame.mStartingSampleInclusive = start_sample;
+        frame.mEndingSampleInclusive = end_sample;
+        
+        frames->push_back({frame});
+    }
+};
+
+#endif // TEENSY_FLEXRAY_FRAME_H

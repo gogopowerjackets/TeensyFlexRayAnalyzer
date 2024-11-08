@@ -1,0 +1,207 @@
+#ifndef TEENSY_ANALYZER_RESULTS_H
+#define TEENSY_ANALYZER_RESULTS_H
+
+#include <Arduino.h>
+#include <SD.h>
+#include <vector>
+#include <string>
+
+// Constants
+const uint64_t INVALID_RESULT_INDEX = 0xFFFFFFFFFFFFFFFFull;
+const uint8_t DISPLAY_AS_ERROR_FLAG = (1 << 7);
+const uint8_t DISPLAY_AS_WARNING_FLAG = (1 << 6);
+
+// Forward declarations
+enum DisplayBase {
+    Decimal,
+    Hexadecimal,
+    Binary,
+    ASCII
+};
+
+typedef uint8_t Channel;
+
+// Frame structure
+class Frame {
+public:
+    Frame() : 
+        mStartingSampleInclusive(0),
+        mEndingSampleInclusive(0),
+        mData1(0),
+        mData2(0),
+        mType(0),
+        mFlags(0) {}
+        
+    Frame(const Frame& frame) :
+        mStartingSampleInclusive(frame.mStartingSampleInclusive),
+        mEndingSampleInclusive(frame.mEndingSampleInclusive),
+        mData1(frame.mData1),
+        mData2(frame.mData2),
+        mType(frame.mType),
+        mFlags(frame.mFlags) {}
+        
+    bool HasFlag(uint8_t flag) {
+        return (mFlags & flag) != 0;
+    }
+    
+    int64_t mStartingSampleInclusive;
+    int64_t mEndingSampleInclusive;
+    uint64_t mData1;
+    uint64_t mData2;
+    uint8_t mType;
+    uint8_t mFlags;
+};
+
+// Base analyzer results class
+class TeensyAnalyzerResults {
+public:
+    enum MarkerType {
+        Dot,
+        ErrorDot,
+        Square,
+        ErrorSquare,
+        UpArrow,
+        DownArrow,
+        X,
+        ErrorX,
+        Start,
+        Stop,
+        One,
+        Zero
+    };
+    
+    TeensyAnalyzerResults() :
+        mCurrentPacketId(0),
+        mExportCancelled(false),
+        mLogFile(nullptr) {
+        mResultStrings.reserve(10);
+        mFrames.reserve(100);
+    }
+    
+    virtual ~TeensyAnalyzerResults() {
+        if (mLogFile) {
+            mLogFile.close();
+        }
+    }
+    
+    // Pure virtual functions that must be implemented by derived classes
+    virtual void GenerateBubbleText(uint64_t frame_index, Channel& channel, DisplayBase display_base) = 0;
+    virtual void GenerateExportFile(const char* file, DisplayBase display_base, uint32_t export_type_user_id) = 0;
+    virtual void GenerateFrameTabularText(uint64_t frame_index, DisplayBase display_base) = 0;
+    
+    // Frame management
+    uint64_t AddFrame(const Frame& frame) {
+        uint64_t frame_id = mFrames.size();
+        mFrames.push_back(frame);
+        return frame_id;
+    }
+    
+    Frame GetFrame(uint64_t frame_id) {
+        if (frame_id < mFrames.size()) {
+            return mFrames[frame_id];
+        }
+        return Frame();
+    }
+    
+    uint64_t GetNumFrames() {
+        return mFrames.size();
+    }
+    
+    // Packet management
+    uint64_t CommitPacketAndStartNewPacket() {
+        uint64_t packet_id = mCurrentPacketId++;
+        mPacketFrames[packet_id] = std::make_pair(mPacketStartFrame, mFrames.size() - 1);
+        mPacketStartFrame = mFrames.size();
+        return packet_id;
+    }
+    
+    void CancelPacketAndStartNewPacket() {
+        mPacketStartFrame = mFrames.size();
+    }
+    
+    // Marker management
+    void AddMarker(uint64_t sample_number, MarkerType marker_type, Channel& channel) {
+        MarkerData marker = {sample_number, marker_type};
+        mMarkers[channel].push_back(marker);
+    }
+    
+    // Results string management
+    void ClearResultStrings() {
+        mResultStrings.clear();
+    }
+    
+    void AddResultString(const char* str1, const char* str2 = nullptr, 
+                        const char* str3 = nullptr, const char* str4 = nullptr, 
+                        const char* str5 = nullptr, const char* str6 = nullptr) {
+        std::string result;
+        const char* strings[] = {str1, str2, str3, str4, str5, str6};
+        
+        for (const char* str : strings) {
+            if (str) {
+                result += str;
+            }
+        }
+        
+        mResultStrings.push_back(result);
+    }
+    
+    // Export management
+    bool InitializeExport(const char* filename) {
+        if (!SD.begin(BUILTIN_SDCARD)) {
+            return false;
+        }
+        
+        mLogFile = SD.open(filename, FILE_WRITE);
+        return mLogFile;
+    }
+    
+    void CommitResults() {
+        if (mLogFile) {
+            mLogFile.flush();
+        }
+    }
+    
+    // Progress tracking
+    bool UpdateExportProgressAndCheckForCancel(uint64_t completed_frames, uint64_t total_frames) {
+        if (mExportCancelled) {
+            return true;
+        }
+        
+        // Calculate progress percentage
+        uint8_t progress = (completed_frames * 100) / total_frames;
+        
+        // Check Serial for cancel command
+        if (Serial.available()) {
+            char c = Serial.read();
+            if (c == 'x') {
+                mExportCancelled = true;
+                return true;
+            }
+        }
+        
+        // Output progress
+        if (progress % 10 == 0) {
+            Serial.printf("Export progress: %d%%\n", progress);
+        }
+        
+        return false;
+    }
+
+protected:
+    struct MarkerData {
+        uint64_t sample_number;
+        MarkerType type;
+    };
+    
+    std::vector<Frame> mFrames;
+    std::vector<std::string> mResultStrings;
+    std::map<Channel, std::vector<MarkerData>> mMarkers;
+    std::map<uint64_t, std::pair<uint64_t, uint64_t>> mPacketFrames;
+    
+    uint64_t mCurrentPacketId;
+    uint64_t mPacketStartFrame;
+    bool mExportCancelled;
+    File mLogFile;
+};
+
+#endif // TEENSY_ANALYZER_RESULTS_H

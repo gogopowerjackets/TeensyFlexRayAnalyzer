@@ -1,0 +1,215 @@
+#ifndef TEENSY_FLEXRAY_ANALYZER_RESULTS_H
+#define TEENSY_FLEXRAY_ANALYZER_RESULTS_H
+
+#include <Arduino.h>
+#include <SD.h>
+#include <vector>
+#include <string>
+
+// FlexRay frame types
+enum FlexRayFrameType {
+    TSSField,
+    BSSField,
+    FSSField,
+    FESField,
+    FlagsField,
+    FrameIdField,
+    PayloadLengthField,
+    HeaderCRCField,
+    CycleCountField,
+    DataField,
+    CRCField
+};
+
+// Frame structure to hold decoded data
+struct FlexRayFrame {
+    uint16_t frame_id;
+    uint8_t cycle_count;
+    uint16_t header_crc;
+    uint32_t crc;
+    std::vector<uint8_t> data;
+};
+
+class TeensyFlexRayResults {
+public:
+    TeensyFlexRayResults() : 
+        mLogFile(nullptr),
+        mDisplayBase(10) {  // Default to decimal
+    }
+    
+    // Initialize SD card logging
+    bool beginLogging(const char* filename) {
+        if (!SD.begin(BUILTIN_SDCARD)) {
+            Serial.println("SD card initialization failed!");
+            return false;
+        }
+        
+        mLogFile = SD.open(filename, FILE_WRITE);
+        if (!mLogFile) {
+            Serial.println("Failed to open log file!");
+            return false;
+        }
+        
+        // Write CSV header
+        mLogFile.println("Time,Flags,FrameID,PayloadLength,HeaderCRC,CycleCount,Data,CRC");
+        return true;
+    }
+    
+    // Log a frame to SD card
+    void logFrame(const FlexRayFrame& frame, uint8_t flags, uint8_t payload_length) {
+        if (!mLogFile) return;
+        
+        // Buffer for number conversion
+        char buffer[32];
+        
+        // Time
+        mLogFile.print(micros());
+        mLogFile.print(",");
+        
+        // Flags
+        mLogFile.print(flags);
+        mLogFile.print(",");
+        
+        // Frame ID
+        mLogFile.print(frame.frame_id);
+        mLogFile.print(",");
+        
+        // Payload Length
+        mLogFile.print(payload_length);
+        mLogFile.print(",");
+        
+        // Header CRC
+        mLogFile.print(frame.header_crc);
+        mLogFile.print(",");
+        
+        // Cycle Count
+        mLogFile.print(frame.cycle_count);
+        mLogFile.print(",");
+        
+        // Data bytes
+        for (size_t i = 0; i < payload_length * 2; i++) {
+            if (i > 0) mLogFile.print("|");
+            mLogFile.print(frame.data[i]);
+        }
+        mLogFile.print(",");
+        
+        // Frame CRC
+        mLogFile.println(frame.crc);
+        
+        // Ensure data is written
+        mLogFile.flush();
+    }
+    
+    // Print frame information to Serial
+    void printFrame(const FlexRayFrame& frame, FlexRayFrameType type, uint64_t data1, uint64_t data2 = 0) {
+        switch (type) {
+            case TSSField:
+                Serial.println("TSS - Transmission Start Sequence");
+                break;
+                
+            case BSSField:
+                Serial.println("BSS - Byte Start Sequence");
+                break;
+                
+            case FSSField:
+                Serial.println("FSS - Frame Start Sequence");
+                break;
+                
+            case FlagsField:
+                Serial.print("Flags: ");
+                Serial.print(data1, mDisplayBase);
+                Serial.print(" (");
+                printFlags(data1);
+                Serial.println(")");
+                break;
+                
+            case FrameIdField:
+                Serial.print("Frame ID: ");
+                Serial.println(data1, mDisplayBase);
+                break;
+                
+            case PayloadLengthField:
+                Serial.print("Payload Length: ");
+                Serial.println(data1, mDisplayBase);
+                break;
+                
+            case HeaderCRCField:
+                Serial.print("Header CRC: 0x");
+                Serial.println(data1, HEX);
+                break;
+                
+            case CycleCountField:
+                Serial.print("Cycle Count: ");
+                Serial.println(data1, mDisplayBase);
+                break;
+                
+            case DataField:
+                Serial.print("Data ");
+                Serial.print(data2);  // Index
+                Serial.print(": 0x");
+                Serial.println(data1, HEX);
+                break;
+                
+            case CRCField:
+                Serial.print("Frame CRC: 0x");
+                Serial.println(data1, HEX);
+                break;
+        }
+    }
+    
+    // Set display base (8 for octal, 10 for decimal, 16 for hex)
+    void setDisplayBase(uint8_t base) {
+        mDisplayBase = base;
+    }
+    
+    void end() {
+        if (mLogFile) {
+            mLogFile.close();
+        }
+    }
+
+private:
+    File mLogFile;
+    uint8_t mDisplayBase;
+    
+    // Helper to print flag bits
+    void printFlags(uint8_t flags) {
+        Serial.print(flags & (1 << 4) ? "R" : "-");  // Reserved
+        Serial.print(flags & (1 << 3) ? "P" : "-");  // Payload Preamble
+        Serial.print(flags & (1 << 2) ? "N" : "-");  // Null frame
+        Serial.print(flags & (1 << 1) ? "S" : "-");  // Sync frame
+        Serial.print(flags & (1 << 0) ? "T" : "-");  // Startup frame
+    }
+};
+
+// Helper class for managing frame data
+class FlexRayFrameBuffer {
+public:
+    FlexRayFrameBuffer(size_t max_frames = 10) : 
+        mMaxFrames(max_frames) {}
+    
+    void addFrame(const FlexRayFrame& frame) {
+        if (mFrames.size() >= mMaxFrames) {
+            mFrames.erase(mFrames.begin());
+        }
+        mFrames.push_back(frame);
+    }
+    
+    const FlexRayFrame& getFrame(size_t index) {
+        return mFrames[index];
+    }
+    
+    size_t getFrameCount() {
+        return mFrames.size();
+    }
+    
+    void clear() {
+        mFrames.clear();
+    }
+
+private:
+    std::vector<FlexRayFrame> mFrames;
+    size_t mMaxFrames;
+};
+
+#endif // TEENSY_FLEXRAY_ANALYZER_RESULTS_H

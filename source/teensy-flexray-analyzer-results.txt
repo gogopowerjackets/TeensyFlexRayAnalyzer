@@ -1,0 +1,203 @@
+#ifndef TEENSY_FLEXRAY_ANALYZER_RESULTS_H
+#define TEENSY_FLEXRAY_ANALYZER_RESULTS_H
+
+#include <Arduino.h>
+#include <SD.h>
+#include <vector>
+#include <string>
+
+// Forward declarations
+class TeensyFlexRayAnalyzer;
+class TeensyFlexRaySettings;
+
+// Frame types enum
+enum FlexRayFrameType {
+    TSSField,
+    BSSField,
+    FSSField,
+    FESField,
+    FlagsField,
+    FrameIdField,
+    PayloadLengthField,
+    HeaderCRCField,
+    CycleCountField,
+    DataField,
+    CRCField
+};
+
+// Display base enum (replacing Saleae's DisplayBase)
+enum DisplayBase {
+    Binary,
+    Decimal,
+    Hexadecimal
+};
+
+// Channel type (replacing Saleae's Channel)
+typedef uint8_t Channel;
+
+// Frame structure for decoded data
+struct Frame {
+    FlexRayFrameType mType;
+    uint64_t mData1;
+    uint64_t mData2;
+    uint32_t mFlags;
+    uint64_t mStartingSampleInclusive;
+    uint64_t mEndingSampleInclusive;
+};
+
+class TeensyFlexRayResults {
+public:
+    TeensyFlexRayResults(TeensyFlexRayAnalyzer* analyzer, TeensyFlexRaySettings* settings) :
+        mAnalyzer(analyzer),
+        mSettings(settings),
+        mCurrentFrame(0),
+        mLogFile(nullptr) {
+            mFrameBuffer.reserve(256); // Pre-allocate space for frames
+    }
+    
+    virtual ~TeensyFlexRayResults() {
+        if (mLogFile) {
+            mLogFile.close();
+        }
+    }
+
+    // Core analysis functions
+    virtual void GenerateBubbleText(uint64_t frame_index, Channel channel, DisplayBase display_base);
+    virtual void GenerateExportFile(const char* file, DisplayBase display_base);
+    virtual void GenerateFrameTabularText(uint64_t frame_index, DisplayBase display_base);
+
+    // Frame management
+    void AddFrame(const Frame& frame) {
+        mFrameBuffer.push_back(frame);
+    }
+
+    Frame GetFrame(uint64_t frame_index) {
+        if (frame_index < mFrameBuffer.size()) {
+            return mFrameBuffer[frame_index];
+        }
+        return Frame(); // Return empty frame if index invalid
+    }
+
+    size_t GetNumFrames() {
+        return mFrameBuffer.size();
+    }
+
+    // Results management
+    void ClearResults() {
+        mFrameBuffer.clear();
+        mCurrentFrame = 0;
+    }
+
+    // Export functionality
+    bool BeginExport(const char* filename) {
+        if (!SD.begin(BUILTIN_SDCARD)) {
+            return false;
+        }
+        mLogFile = SD.open(filename, FILE_WRITE);
+        return mLogFile;
+    }
+
+    void AddResultString(const char* str) {
+        // For Teensy, we'll print to Serial and/or SD card
+        if (mLogFile) {
+            mLogFile.println(str);
+        }
+        Serial.println(str);
+    }
+
+    // Helper functions for number formatting
+    void GetNumberString(uint64_t number, DisplayBase display_base, uint8_t bit_size, char* str, size_t str_size) {
+        switch (display_base) {
+            case Binary:
+                snprintf(str, str_size, "0b%b", (uint32_t)number);
+                break;
+            case Decimal:
+                snprintf(str, str_size, "%lu", (uint32_t)number);
+                break;
+            case Hexadecimal:
+                snprintf(str, str_size, "0x%X", (uint32_t)number);
+                break;
+        }
+    }
+
+    void GetTimeString(uint64_t sample, uint64_t trigger_sample, uint32_t sample_rate_hz, char* str, size_t str_size) {
+        double time_ms = (double)(sample - trigger_sample) / sample_rate_hz * 1000.0;
+        snprintf(str, str_size, "%.3f ms", time_ms);
+    }
+
+protected:
+    TeensyFlexRayAnalyzer* mAnalyzer;
+    TeensyFlexRaySettings* mSettings;
+    std::vector<Frame> mFrameBuffer;
+    size_t mCurrentFrame;
+    File mLogFile;
+
+    // Helper functions for formatting
+    void FormatFlags(uint8_t flags, char* str, size_t str_size) {
+        snprintf(str, str_size, 
+                "R:%d PP:%d NF:%d SF:%d STF:%d",
+                (flags >> 4) & 1,
+                (flags >> 3) & 1,
+                (flags >> 2) & 1,
+                (flags >> 1) & 1,
+                flags & 1);
+    }
+
+    void WriteExportHeader() {
+        if (mLogFile) {
+            mLogFile.println("Time [s],Flags,FrameId,PayloadLength,HeaderCRC,CycleCount,Data,CRC");
+        }
+    }
+};
+
+// Implementation of key virtual functions
+inline void TeensyFlexRayResults::GenerateBubbleText(uint64_t frame_index, Channel channel, DisplayBase display_base) {
+    Frame frame = GetFrame(frame_index);
+    char tmp_str[128];
+
+    switch (frame.mType) {
+        case TSSField:
+            AddResultString("TSS");
+            AddResultString("Transmission Start Sequence");
+            break;
+            
+        case FlagsField:
+            GetNumberString(frame.mData1, display_base, 5, tmp_str, sizeof(tmp_str));
+            AddResultString("Flags: ");
+            AddResultString(tmp_str);
+            break;
+            
+        // ... Additional cases for other frame types ...
+    }
+}
+
+inline void TeensyFlexRayResults::GenerateExportFile(const char* file, DisplayBase display_base) {
+    if (!BeginExport(file)) {
+        return;
+    }
+    
+    WriteExportHeader();
+    
+    for (size_t i = 0; i < GetNumFrames(); i++) {
+        Frame frame = GetFrame(i);
+        char tmp_str[128];
+        
+        // Write frame data to file
+        GetTimeString(frame.mStartingSampleInclusive, 0, mAnalyzer->GetSampleRate(), tmp_str, sizeof(tmp_str));
+        mLogFile.print(tmp_str);
+        mLogFile.print(",");
+        
+        // ... Additional export formatting ...
+    }
+    
+    mLogFile.close();
+}
+
+inline void TeensyFlexRayResults::GenerateFrameTabularText(uint64_t frame_index, DisplayBase display_base) {
+    Frame frame = GetFrame(frame_index);
+    char tmp_str[128];
+    GetNumberString(frame.mData1, display_base, 8, tmp_str, sizeof(tmp_str));
+    AddResultString(tmp_str);
+}
+
+#endif // TEENSY_FLEXRAY_ANALYZER_RESULTS_H

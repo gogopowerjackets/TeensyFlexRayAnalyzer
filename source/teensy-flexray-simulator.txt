@@ -1,0 +1,171 @@
+#ifndef TEENSY_FLEXRAY_SIMULATOR_H
+#define TEENSY_FLEXRAY_SIMULATOR_H
+
+#include <Arduino.h>
+#include "TeensyFlexRayFrame.h"
+#include "TeensyFlexRaySettings.h"
+
+class TeensyFlexRaySimulator {
+public:
+    TeensyFlexRaySimulator() : 
+        mOutputPin(255),
+        mBitRate(10000000),  // Default 10Mbps
+        mInverted(false),
+        mRunning(false) {
+    }
+    
+    void Initialize(uint8_t output_pin, TeensyFlexRaySettings* settings) {
+        mOutputPin = output_pin;
+        mBitRate = settings->GetBitRate();
+        mInverted = settings->GetInverted();
+        
+        // Configure output pin
+        pinMode(mOutputPin, OUTPUT);
+        digitalWrite(mOutputPin, mInverted ? LOW : HIGH);
+        
+        // Initialize timing
+        mBitPeriod = 1000000 / mBitRate; // in microseconds
+    }
+    
+    void GenerateTestPattern() {
+        if (mOutputPin == 255) return;
+        
+        mRunning = true;
+        
+        // Create test frame
+        TeensyFlexRayFrame test_frame;
+        test_frame.SetFrameId(0x12);
+        test_frame.SetCycleCount(10);
+        
+        // Test data
+        uint8_t data[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+        test_frame.SetData(std::vector<uint8_t>(data, data + sizeof(data)));
+        
+        while (mRunning) {
+            // Generate frame
+            test_frame.SetCycleCount((test_frame.GetCycleCount() + 1) % 64);
+            auto bitstream = test_frame.GenerateStream();
+            
+            // Generate idle period
+            GenerateIdle(IDLE_PERIOD_LEN);
+            
+            // Send frame
+            for (bool bit : bitstream) {
+                WriteBit(bit);
+            }
+            
+            // Return to idle state
+            WriteBit(true);
+            
+            // Check for stop command
+            if (Serial.available() && Serial.read() == 'x') {
+                mRunning = false;
+            }
+        }
+    }
+    
+    // Advanced test pattern with configurable parameters
+    void GenerateCustomPattern(const std::vector<TeensyFlexRayFrame>& frames, 
+                             uint32_t repeat_count = 1,
+                             uint32_t inter_frame_gap = IDLE_PERIOD_LEN) {
+        if (mOutputPin == 255) return;
+        
+        mRunning = true;
+        uint32_t frame_count = 0;
+        
+        while (mRunning && (repeat_count == 0 || frame_count < repeat_count)) {
+            for (const auto& frame : frames) {
+                // Generate frame
+                auto bitstream = frame.GenerateStream();
+                
+                // Generate inter-frame gap
+                GenerateIdle(inter_frame_gap);
+                
+                // Send frame
+                for (bool bit : bitstream) {
+                    WriteBit(bit);
+                }
+                
+                // Return to idle state
+                WriteBit(true);
+                
+                frame_count++;
+                
+                // Check for stop command
+                if (Serial.available() && Serial.read() == 'x') {
+                    mRunning = false;
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Generate specific error conditions for testing
+    void GenerateErrorPattern(uint8_t error_type) {
+        TeensyFlexRayFrame frame;
+        frame.SetFrameId(0x12);
+        frame.SetCycleCount(10);
+        
+        auto bitstream = frame.GenerateStream();
+        
+        switch (error_type) {
+            case 0: // CRC Error
+                // Modify CRC bits
+                bitstream[bitstream.size() - 24] ^= 1;
+                break;
+                
+            case 1: // Frame ID Error
+                // Modify frame ID bits
+                bitstream[20] ^= 1;
+                break;
+                
+            case 2: // Sync Error
+                // Remove sync bits
+                bitstream[5] = false;
+                break;
+        }
+        
+        // Send corrupted frame
+        GenerateIdle(IDLE_PERIOD_LEN);
+        for (bool bit : bitstream) {
+            WriteBit(bit);
+        }
+        WriteBit(true);
+    }
+    
+    void Stop() {
+        mRunning = false;
+    }
+
+private:
+    uint8_t mOutputPin;
+    uint32_t mBitRate;
+    bool mInverted;
+    bool mRunning;
+    uint32_t mBitPeriod;
+    
+    static const uint32_t IDLE_PERIOD_LEN = 100;
+    
+    void WriteBit(bool bit) {
+        digitalWrite(mOutputPin, (bit ^ mInverted) ? HIGH : LOW);
+        delayMicroseconds(mBitPeriod);
+    }
+    
+    void GenerateIdle(uint32_t bits) {
+        digitalWrite(mOutputPin, mInverted ? LOW : HIGH);
+        delayMicroseconds(mBitPeriod * bits);
+    }
+    
+    // Helper for precise timing
+    void PreciseDelay(uint32_t microseconds) {
+        uint32_t start = micros();
+        while (micros() - start < microseconds) {
+            // Use yield() on longer delays
+            if (microseconds > 1000) {
+                yield();
+            }
+        }
+    }
+};
+
+#endif // TEENSY_FLEXRAY_SIMULATOR_H

@@ -1,0 +1,189 @@
+#ifndef TEENSY_FLEXRAY_ANALYZER_H
+#define TEENSY_FLEXRAY_ANALYZER_H
+
+#include <Arduino.h>
+#include <vector>
+#include <queue>
+
+// Constants
+const uint32_t MIN_IDLE_LEN = 4;  // Minimum idle length in bits
+
+// Frame types
+enum FlexRayFrameType {
+    TSSField,
+    FSSField,
+    BSSField,
+    DataField,
+    // Add other frame types as needed
+};
+
+// Structure to hold decoded bits
+struct DecoderBit {
+    uint64_t start_sample;
+    uint64_t end_sample;
+    bool bit;
+};
+
+// Frame structure
+struct Frame {
+    FlexRayFrameType mType;
+    uint64_t mData1;
+    uint64_t mData2;
+    uint32_t mFlags;
+    uint64_t mStartingSampleInclusive;
+    uint64_t mEndingSampleInclusive;
+};
+
+// Settings class
+class FlexRayAnalyzerSettings {
+public:
+    FlexRayAnalyzerSettings() : 
+        mInputPin(0),
+        mBitRate(10000000),  // 10Mbps default
+        mRecessiveState(HIGH) {}
+    
+    int mInputPin;
+    uint32_t mBitRate;
+    int mRecessiveState;
+    
+    int Recessive() const { return mRecessiveState; }
+    int Dominant() const { return !mRecessiveState; }
+};
+
+class TeensyFlexRayAnalyzer {
+public:
+    TeensyFlexRayAnalyzer() {
+        mSettings = new FlexRayAnalyzerSettings();
+        InitAnalyzer();
+    }
+    
+    ~TeensyFlexRayAnalyzer() {
+        delete mSettings;
+    }
+
+    void Begin() {
+        pinMode(mSettings->mInputPin, INPUT);
+        mSampleRateHz = F_CPU;  // Use Teensy's CPU frequency
+        mSamplesPerBit = mSampleRateHz / mSettings->mBitRate;
+        Serial.printf("Samples per bit: %d\n", mSamplesPerBit);
+    }
+
+    void ProcessData() {
+        std::vector<DecoderBit> bits;
+        
+        while(true) {
+            bits.clear();
+            
+            // Wait for next frame
+            WaitForNextFrame();
+            
+            // Sample mid-bit
+            uint32_t mSamplesPerHalfBit = mSamplesPerBit / 2;
+            delayMicroseconds(mSamplesPerHalfBit * 1000000 / mSampleRateHz);
+            
+            // Skip FSS
+            SampleBit();
+            uint64_t starting_sample = micros();
+            
+            // Sample bits until frame end
+            while(true) {
+                // Read BSS
+                if(SampleBit(true) != true || SampleBit(true) != false) {
+                    break;
+                }
+                
+                // Read 8 bits
+                for(int i = 7; i >= 0; i--) {
+                    DecoderBit bit;
+                    bit.start_sample = micros();
+                    bit.bit = SampleBit();
+                    bit.end_sample = micros();
+                    bits.push_back(bit);
+                }
+            }
+            
+            // Process decoded bits
+            ProcessDecodedBits(bits);
+            
+            // Check for user interrupt
+            if(Serial.available() && Serial.read() == 'x') {
+                break;
+            }
+        }
+    }
+
+    void SetInputPin(int pin) {
+        mSettings->mInputPin = pin;
+    }
+
+    void SetBitRate(uint32_t bitRate) {
+        mSettings->mBitRate = bitRate;
+        mSamplesPerBit = mSampleRateHz / bitRate;
+    }
+
+private:
+    FlexRayAnalyzerSettings* mSettings;
+    uint32_t mSampleRateHz;
+    uint32_t mSamplesPerBit;
+    std::queue<Frame> mFrameQueue;
+
+    void InitAnalyzer() {
+        mSampleRateHz = F_CPU;
+        mSamplesPerBit = mSampleRateHz / mSettings->mBitRate;
+    }
+
+    bool SampleBit(bool check_only = false) {
+        bool result = (digitalRead(mSettings->mInputPin) == mSettings->Recessive());
+        
+        if (!check_only) {
+            delayMicroseconds(mSamplesPerBit * 1000000 / mSampleRateHz);
+        }
+        
+        return result;
+    }
+
+    void WaitForNextFrame() {
+        // Wait for recessive bit
+        while(digitalRead(mSettings->mInputPin) == mSettings->Dominant()) {
+            delayMicroseconds(1);
+        }
+        
+        // Find TSS
+        uint32_t idle_count = 0;
+        while(idle_count < MIN_IDLE_LEN) {
+            if(digitalRead(mSettings->mInputPin) == mSettings->Recessive()) {
+                idle_count++;
+            } else {
+                idle_count = 0;
+            }
+            delayMicroseconds(mSamplesPerBit * 1000000 / mSampleRateHz);
+        }
+    }
+
+    void ProcessDecodedBits(const std::vector<DecoderBit>& bits) {
+        if(bits.empty()) return;
+        
+        Frame frame;
+        frame.mType = DataField;
+        frame.mData1 = 0;
+        frame.mData2 = 0;
+        frame.mStartingSampleInclusive = bits.front().start_sample;
+        frame.mEndingSampleInclusive = bits.back().end_sample;
+        
+        // Process bits into bytes
+        uint32_t byteValue = 0;
+        for(size_t i = 0; i < bits.size() && i < 32; i++) {
+            byteValue = (byteValue << 1) | (bits[i].bit ? 1 : 0);
+            
+            if((i + 1) % 8 == 0) {
+                // Print decoded byte
+                Serial.printf("Decoded byte: 0x%02X\n", byteValue);
+                byteValue = 0;
+            }
+        }
+        
+        mFrameQueue.push(frame);
+    }
+};
+
+#endif // TEENSY_FLEXRAY_ANALYZER_H

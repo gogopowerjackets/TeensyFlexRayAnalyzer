@@ -1,0 +1,174 @@
+#ifndef TEENSY_FLEXRAY_SIMULATOR_H
+#define TEENSY_FLEXRAY_SIMULATOR_H
+
+#include <Arduino.h>
+#include <queue>
+#include "TeensyFlexRaySettings.h"
+
+// Forward declarations
+class TeensyFlexRayFrame;
+
+// Channel descriptor for simulation data
+class SimulationChannelDescriptor {
+public:
+    SimulationChannelDescriptor() : 
+        mCurrentSample(0),
+        mCurrentState(HIGH) {}
+        
+    void SetChannel(uint8_t channel) {
+        mChannel = channel;
+        pinMode(channel, OUTPUT);
+        digitalWrite(channel, mCurrentState);
+    }
+    
+    void SetSampleRate(uint32_t rate) {
+        mSampleRateHz = rate;
+        mSamplePeriodUs = 1000000 / rate;
+    }
+    
+    void SetInitialBitState(bool state) {
+        mCurrentState = state;
+        if (mChannel != 255) {
+            digitalWrite(mChannel, mCurrentState);
+        }
+    }
+    
+    uint64_t GetCurrentSampleNumber() const {
+        return mCurrentSample;
+    }
+    
+    void TransitionIfNeeded(bool new_state) {
+        if (mCurrentState != new_state) {
+            mCurrentState = new_state;
+            if (mChannel != 255) {
+                digitalWrite(mChannel, mCurrentState);
+            }
+        }
+    }
+    
+    void Advance(uint32_t samples) {
+        mCurrentSample += samples;
+        delayMicroseconds(samples * mSamplePeriodUs);
+    }
+
+private:
+    uint8_t mChannel = 255;
+    uint32_t mSampleRateHz = 0;
+    uint32_t mSamplePeriodUs = 0;
+    uint64_t mCurrentSample = 0;
+    bool mCurrentState = HIGH;
+};
+
+class TeensyFlexRaySimulator {
+public:
+    TeensyFlexRaySimulator();
+    ~TeensyFlexRaySimulator();
+    
+    // Initialization
+    void Initialize(uint32_t simulation_sample_rate, TeensyFlexRaySettings* settings);
+    
+    // Main simulation function
+    uint32_t GenerateSimulationData(uint64_t newest_sample_requested, 
+                                  uint32_t sample_rate,
+                                  SimulationChannelDescriptor** simulation_channel);
+    
+    // Additional simulation control
+    void Stop() { mRunning = false; }
+    void Resume() { mRunning = true; }
+    bool IsRunning() const { return mRunning; }
+    
+    // Frame queue management
+    void QueueFrame(const TeensyFlexRayFrame& frame) {
+        mFrameQueue.push(frame);
+    }
+    
+    void ClearQueue() {
+        while (!mFrameQueue.empty()) {
+            mFrameQueue.pop();
+        }
+    }
+    
+    // Configuration
+    void SetInterFrameGap(uint32_t bits) { mInterFrameGap = bits; }
+    void SetErrorRate(float rate) { mErrorRate = rate; }
+    void SetJitterAmount(uint32_t jitter_us) { mJitterUs = jitter_us; }
+    
+    // Statistics
+    struct SimStats {
+        uint32_t frames_sent = 0;
+        uint32_t bytes_sent = 0;
+        uint32_t errors_injected = 0;
+        uint64_t total_bits = 0;
+        
+        void Reset() {
+            frames_sent = 0;
+            bytes_sent = 0;
+            errors_injected = 0;
+            total_bits = 0;
+        }
+    };
+    
+    const SimStats& GetStats() const { return mStats; }
+    void ResetStats() { mStats.Reset(); }
+
+protected:
+    // Helper functions
+    void CreateSerialByte();
+    void InjectError();
+    void AddJitter();
+    void UpdateStats(const TeensyFlexRayFrame& frame);
+    
+    // Timing helpers
+    void PreciseDelay(uint32_t microseconds) {
+        if (microseconds > 100) {
+            uint32_t start = micros();
+            while (micros() - start < microseconds) {
+                if (microseconds > 1000) yield();
+            }
+        } else {
+            delayMicroseconds(microseconds);
+        }
+    }
+
+protected:
+    // Core members
+    TeensyFlexRaySettings* mSettings;
+    uint32_t mSimulationSampleRateHz;
+    SimulationChannelDescriptor mSerialSimulationData;
+    
+    // Control flags
+    bool mRunning;
+    bool mErrorInjectionEnabled;
+    
+    // Configuration
+    uint32_t mInterFrameGap;
+    float mErrorRate;
+    uint32_t mJitterUs;
+    
+    // Data management
+    std::queue<TeensyFlexRayFrame> mFrameQueue;
+    
+    // Statistics tracking
+    SimStats mStats;
+    
+    // Constants
+    static const uint32_t DEFAULT_INTER_FRAME_GAP = 100;
+    static const uint32_t MAX_JITTER_US = 100;
+    static const float DEFAULT_ERROR_RATE = 0.0f;
+};
+
+inline TeensyFlexRaySimulator::TeensyFlexRaySimulator() :
+    mSettings(nullptr),
+    mSimulationSampleRateHz(0),
+    mRunning(false),
+    mErrorInjectionEnabled(false),
+    mInterFrameGap(DEFAULT_INTER_FRAME_GAP),
+    mErrorRate(DEFAULT_ERROR_RATE),
+    mJitterUs(0) {
+}
+
+inline TeensyFlexRaySimulator::~TeensyFlexRaySimulator() {
+    Stop();
+}
+
+#endif // TEENSY_FLEXRAY_SIMULATOR_H

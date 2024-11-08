@@ -1,0 +1,177 @@
+#ifndef TEENSY_FLEXRAY_FRAME_H
+#define TEENSY_FLEXRAY_FRAME_H
+
+#include <Arduino.h>
+#include <vector>
+
+// Forward declarations
+class TeensyFlexRayResults;
+
+// FlexRay frame field types
+enum FlexRayFrameType {
+    TSSField,
+    BSSField,
+    FSSField,
+    FESField,
+    FlagsField,
+    FrameIdField,
+    PayloadLengthField,
+    HeaderCRCField,
+    CycleCountField,
+    DataField,
+    CRCField
+};
+
+// Structure for decoded bits with timing information
+struct DecoderBit {
+    bool bit;
+    int64_t start_sample;
+    int64_t end_sample;
+};
+
+// Frame wrapper for sorting
+struct FrameSortingWrapper {
+    Frame f;
+    
+    bool operator<(const FrameSortingWrapper& other) const {
+        return f.mStartingSampleInclusive < other.f.mStartingSampleInclusive;
+    }
+};
+
+class TeensyFlexRayFrame {
+public:
+    TeensyFlexRayFrame();
+    ~TeensyFlexRayFrame();
+
+    // Core frame operations
+    std::vector<bool> GenerateStream(bool in_dynamic_section = false);
+    void Decode(const std::vector<DecoderBit>& bitstream, 
+                std::vector<FrameSortingWrapper>* frames);
+
+    // Frame construction helper
+    void AddResultFrame(std::vector<FrameSortingWrapper>* frames,
+                       FlexRayFrameType type,
+                       int64_t start_sample,
+                       int64_t end_sample,
+                       uint64_t data1 = 0,
+                       uint64_t data2 = 0);
+
+    // Flag accessors
+    void SetPayloadPreamble(bool value) { payload_preamble = value; }
+    void SetNullFrame(bool value) { null_frame = value; }
+    void SetSyncFrame(bool value) { sync_frame = value; }
+    void SetStartupFrame(bool value) { startup_frame = value; }
+    
+    bool GetPayloadPreamble() const { return payload_preamble; }
+    bool GetNullFrame() const { return null_frame; }
+    bool GetSyncFrame() const { return sync_frame; }
+    bool GetStartupFrame() const { return startup_frame; }
+
+    // Frame data accessors
+    void SetFrameId(uint16_t id) { frame_id = id; }
+    void SetCycleCount(uint8_t count) { cycle_count = count; }
+    void SetHeaderCRC(uint16_t crc) { header_crc = crc; }
+    void SetFrameCRC(uint32_t frame_crc) { crc = frame_crc; }
+    
+    uint16_t GetFrameId() const { return frame_id; }
+    uint8_t GetCycleCount() const { return cycle_count; }
+    uint16_t GetHeaderCRC() const { return header_crc; }
+    uint32_t GetFrameCRC() const { return crc; }
+
+    // Payload data management
+    void ClearData() { data.clear(); }
+    void AddData(uint8_t byte) { data.push_back(byte); }
+    void SetData(const std::vector<uint8_t>& new_data) { data = new_data; }
+    const std::vector<uint8_t>& GetData() const { return data; }
+    
+    // Validation
+    bool IsValid() const;
+    
+    // Debug helpers
+    void PrintFrame() const;
+    String GetFrameString() const;
+
+private:
+    // Frame fields
+    bool payload_preamble;
+    bool null_frame;
+    bool sync_frame;
+    bool startup_frame;
+    uint16_t header_crc;
+    uint16_t frame_id;
+    uint8_t cycle_count;
+    std::vector<uint8_t> data;
+    uint32_t crc;
+
+    // Helper functions
+    bool ValidateHeaderCRC() const;
+    bool ValidateFrameCRC() const;
+    uint16_t CalculateHeaderCRC() const;
+    uint32_t CalculateFrameCRC() const;
+    
+    // Constants
+    static const uint8_t MAX_PAYLOAD_LENGTH = 254;  // Maximum FlexRay payload length
+    static const uint8_t MIN_FRAME_SIZE = 5;       // Minimum size for a valid frame
+    static const uint16_t FRAME_ID_MASK = 0x07FF;  // 11-bit frame ID mask
+    static const uint8_t CYCLE_COUNT_MASK = 0x3F;  // 6-bit cycle count mask
+};
+
+// Inline implementations of simple accessors
+inline bool TeensyFlexRayFrame::IsValid() const {
+    return frame_id != 0 &&                     // Frame ID cannot be 0
+           frame_id <= FRAME_ID_MASK &&         // Frame ID must fit in 11 bits
+           cycle_count <= CYCLE_COUNT_MASK &&   // Cycle count must fit in 6 bits
+           data.size() <= MAX_PAYLOAD_LENGTH && // Data must not exceed maximum length
+           ValidateHeaderCRC() &&               // Header CRC must be valid
+           ValidateFrameCRC();                  // Frame CRC must be valid
+}
+
+inline void TeensyFlexRayFrame::PrintFrame() const {
+    Serial.println(F("FlexRay Frame:"));
+    Serial.printf("Frame ID: %u\n", frame_id);
+    Serial.printf("Cycle Count: %u\n", cycle_count);
+    Serial.printf("Flags: PP=%d NF=%d SF=%d STF=%d\n",
+                 payload_preamble, null_frame, sync_frame, startup_frame);
+    Serial.printf("Header CRC: 0x%04X\n", header_crc);
+    Serial.printf("Data Length: %u\n", data.size());
+    Serial.printf("Frame CRC: 0x%08lX\n", crc);
+    
+    Serial.print(F("Data: "));
+    for (size_t i = 0; i < data.size(); i++) {
+        Serial.printf("%02X ", data[i]);
+        if ((i + 1) % 16 == 0) Serial.println();
+    }
+    Serial.println();
+}
+
+inline String TeensyFlexRayFrame::GetFrameString() const {
+    String result;
+    result.reserve(100);  // Pre-allocate space
+    
+    result += F("FID:");
+    result += String(frame_id);
+    result += F(" CC:");
+    result += String(cycle_count);
+    result += F(" Flags:");
+    result += payload_preamble ? 'P' : '-';
+    result += null_frame ? 'N' : '-';
+    result += sync_frame ? 'S' : '-';
+    result += startup_frame ? 'T' : '-';
+    
+    if (!data.empty()) {
+        result += F(" Data[");
+        result += String(data.size());
+        result += F("]: ");
+        // Add first few bytes as hex
+        for (size_t i = 0; i < min(data.size(), (size_t)4); i++) {
+            char hex[3];
+            snprintf(hex, sizeof(hex), "%02X", data[i]);
+            result += hex;
+        }
+        if (data.size() > 4) result += F("...");
+    }
+    
+    return result;
+}
+
+#endif // TEENSY_FLEXRAY_FRAME_H

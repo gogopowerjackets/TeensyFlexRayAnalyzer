@@ -1,0 +1,194 @@
+#ifndef TEENSY_ANALYZER_CHANNEL_DATA_H
+#define TEENSY_ANALYZER_CHANNEL_DATA_H
+
+#include <Arduino.h>
+#include <CircularBuffer.h>  // Using CircularBuffer for efficient edge timing storage
+
+typedef uint64_t U64;
+typedef uint32_t U32;
+typedef bool BitState;
+
+class TeensyAnalyzerChannelData {
+public:
+    TeensyAnalyzerChannelData(uint8_t pin) : 
+        mPin(pin),
+        mCurrentSample(0),
+        mLastStateChange(0),
+        mMinPulseWidth(UINT64_MAX),
+        mTrackMinPulseWidth(false) {
+        
+        // Configure pin
+        pinMode(mPin, INPUT);
+        
+        // Initialize edge detection interrupt
+        attachInterrupt(digitalPinToInterrupt(mPin), 
+                       std::bind(&TeensyAnalyzerChannelData::handleEdgeInterrupt, this),
+                       CHANGE);
+                       
+        // Initialize circular buffer for edge timing
+        mEdgeBuffer.clear();
+        
+        // Store initial state
+        mLastState = digitalRead(mPin);
+    }
+    
+    ~TeensyAnalyzerChannelData() {
+        detachInterrupt(digitalPinToInterrupt(mPin));
+    }
+    
+    // State queries
+    U64 GetSampleNumber() {
+        return micros();  // Use Teensy's microsecond timer
+    }
+    
+    BitState GetBitState() {
+        return digitalRead(mPin);
+    }
+    
+    // Basic movement operations
+    U32 Advance(U32 num_samples) {
+        U32 transitions = 0;
+        U64 target_time = micros() + (num_samples * mSamplePeriod);
+        
+        // Count transitions that occurred during the advance period
+        while (!mEdgeBuffer.isEmpty()) {
+            U64 edge_time = mEdgeBuffer.first();
+            if (edge_time <= target_time) {
+                transitions++;
+                mEdgeBuffer.shift();  // Remove processed edge
+            } else {
+                break;
+            }
+        }
+        
+        delayMicroseconds(target_time - micros());
+        mCurrentSample += num_samples;
+        return transitions;
+    }
+    
+    U32 AdvanceToAbsPosition(U64 sample_number) {
+        if (sample_number < mCurrentSample) {
+            return 0;  // Can't go backwards
+        }
+        
+        return Advance(sample_number - mCurrentSample);
+    }
+    
+    void AdvanceToNextEdge() {
+        if (!mEdgeBuffer.isEmpty()) {
+            U64 next_edge = mEdgeBuffer.first();
+            U64 current_time = micros();
+            
+            if (next_edge > current_time) {
+                delayMicroseconds(next_edge - current_time);
+            }
+            
+            mEdgeBuffer.shift();  // Remove processed edge
+            mCurrentSample = next_edge;
+        }
+    }
+    
+    // Advanced queries
+    U64 GetSampleOfNextEdge() {
+        return mEdgeBuffer.isEmpty() ? 0 : mEdgeBuffer.first();
+    }
+    
+    bool WouldAdvancingCauseTransition(U32 num_samples) {
+        if (mEdgeBuffer.isEmpty()) {
+            return false;
+        }
+        
+        U64 target_time = micros() + (num_samples * mSamplePeriod);
+        return mEdgeBuffer.first() <= target_time;
+    }
+    
+    bool WouldAdvancingToAbsPositionCauseTransition(U64 sample_number) {
+        if (sample_number < mCurrentSample || mEdgeBuffer.isEmpty()) {
+            return false;
+        }
+        
+        return mEdgeBuffer.first() <= sample_number;
+    }
+    
+    // Pulse width tracking
+    void TrackMinimumPulseWidth() {
+        mTrackMinPulseWidth = true;
+        mMinPulseWidth = UINT64_MAX;
+    }
+    
+    U64 GetMinimumPulseWidthSoFar() {
+        return mMinPulseWidth;
+    }
+    
+    bool DoMoreTransitionsExistInCurrentData() {
+        return !mEdgeBuffer.isEmpty();
+    }
+    
+    // Configuration
+    void SetSampleRate(U32 sample_rate_hz) {
+        mSamplePeriod = 1000000 / sample_rate_hz;  // Convert to microseconds
+    }
+
+private:
+    static const size_t EDGE_BUFFER_SIZE = 256;
+    CircularBuffer<U64, EDGE_BUFFER_SIZE> mEdgeBuffer;
+    
+    uint8_t mPin;
+    U64 mCurrentSample;
+    U64 mLastStateChange;
+    U64 mMinPulseWidth;
+    bool mTrackMinPulseWidth;
+    BitState mLastState;
+    U32 mSamplePeriod;  // in microseconds
+    
+    // Interrupt handler for edge detection
+    void handleEdgeInterrupt() {
+        U64 current_time = micros();
+        BitState current_state = digitalRead(mPin);
+        
+        // Store edge timing
+        if (!mEdgeBuffer.isFull()) {
+            mEdgeBuffer.push(current_time);
+        }
+        
+        // Track minimum pulse width if enabled
+        if (mTrackMinPulseWidth) {
+            U64 pulse_width = current_time - mLastStateChange;
+            if (pulse_width < mMinPulseWidth) {
+                mMinPulseWidth = pulse_width;
+            }
+        }
+        
+        mLastStateChange = current_time;
+        mLastState = current_state;
+    }
+};
+
+// Helper class for managing multiple channels
+class TeensyAnalyzerChannels {
+public:
+    TeensyAnalyzerChannels() {}
+    
+    TeensyAnalyzerChannelData* AddChannel(uint8_t pin) {
+        TeensyAnalyzerChannelData* channel = new TeensyAnalyzerChannelData(pin);
+        mChannels.push_back(channel);
+        return channel;
+    }
+    
+    void SetSampleRate(U32 sample_rate_hz) {
+        for (auto channel : mChannels) {
+            channel->SetSampleRate(sample_rate_hz);
+        }
+    }
+    
+    ~TeensyAnalyzerChannels() {
+        for (auto channel : mChannels) {
+            delete channel;
+        }
+    }
+
+private:
+    std::vector<TeensyAnalyzerChannelData*> mChannels;
+};
+
+#endif // TEENSY_ANALYZER_CHANNEL_DATA_H

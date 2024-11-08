@@ -1,0 +1,143 @@
+#ifndef TEENSY_FLEXRAY_PARAMETERS_H
+#define TEENSY_FLEXRAY_PARAMETERS_H
+
+#include <Arduino.h>
+
+namespace FlexRayParams {
+    // Protocol timing parameters
+    struct Timing {
+        static constexpr uint32_t IDLE_PERIOD_LEN = 100;   // Idle period length
+        static constexpr uint32_t MIN_IDLE_LEN = 9;        // Minimum idle length (> 1 byte)
+        static constexpr uint32_t TSS_LEN = 5;             // Transmission Start Sequence length
+        
+        // Timing calculations
+        static constexpr uint32_t BIT_TIME_NS = 100;       // 10 Mbps = 100ns per bit
+        static constexpr uint32_t SAMPLE_POINT_NS = 50;    // Sample at 50% of bit time
+        static constexpr uint32_t MIN_SYNC_WIDTH_NS = 30;  // Minimum sync width
+    };
+    
+    // Protocol limits and counts
+    struct Limits {
+        static constexpr uint8_t NUM_CYCLES = 64;          // Number of cycles
+        static constexpr uint16_t MAX_FRAME_LEN = 127;     // Maximum frame length
+        static constexpr uint8_t MIN_FRAME_LEN = 4;        // Minimum frame length
+        static constexpr uint16_t MAX_PAYLOAD_LEN = 254;   // Maximum payload length
+    };
+    
+    // CRC parameters
+    struct CRC {
+        // CRC11 (Header)
+        static constexpr uint16_t CRC11_POLYNOMIAL = 0xB85;
+        static constexpr uint16_t CRC11_INIT = 0x01A;
+        static constexpr uint8_t CRC11_WIDTH = 11;
+        
+        // CRC24 (Frame)
+        static constexpr uint32_t CRC24_POLYNOMIAL = 0x5D6DCB;
+        static constexpr uint32_t CRC24_INIT = 0xFEDCBA;
+        static constexpr uint8_t CRC24_WIDTH = 24;
+        
+        // Helper functions for CRC calculation
+        static inline uint16_t CalculateHeaderCRC(const uint8_t* data, size_t length) {
+            uint16_t crc = CRC11_INIT;
+            
+            for (size_t i = 0; i < length; i++) {
+                crc ^= (uint16_t)data[i] << (CRC11_WIDTH - 8);
+                
+                for (uint8_t bit = 0; bit < 8; bit++) {
+                    if (crc & (1 << (CRC11_WIDTH - 1))) {
+                        crc = (crc << 1) ^ CRC11_POLYNOMIAL;
+                    } else {
+                        crc = crc << 1;
+                    }
+                }
+            }
+            
+            return crc & ((1 << CRC11_WIDTH) - 1);
+        }
+        
+        static inline uint32_t CalculateFrameCRC(const uint8_t* data, size_t length) {
+            uint32_t crc = CRC24_INIT;
+            
+            for (size_t i = 0; i < length; i++) {
+                crc ^= (uint32_t)data[i] << (CRC24_WIDTH - 8);
+                
+                for (uint8_t bit = 0; bit < 8; bit++) {
+                    if (crc & (1 << (CRC24_WIDTH - 1))) {
+                        crc = (crc << 1) ^ CRC24_POLYNOMIAL;
+                    } else {
+                        crc = crc << 1;
+                    }
+                }
+            }
+            
+            return crc & ((1 << CRC24_WIDTH) - 1);
+        }
+    };
+    
+    // Frame structure parameters
+    struct Frame {
+        static constexpr uint8_t HEADER_LEN = 5;           // Header length in bytes
+        static constexpr uint8_t FRAME_ID_BITS = 11;       // Frame ID field width
+        static constexpr uint8_t CYCLE_COUNT_BITS = 6;     // Cycle count field width
+        static constexpr uint8_t PAYLOAD_LEN_BITS = 7;     // Payload length field width
+        
+        // Bit positions in header
+        static constexpr uint8_t RESERVED_BIT_POS = 0;
+        static constexpr uint8_t PAYLOAD_PREAMBLE_BIT_POS = 1;
+        static constexpr uint8_t NULL_FRAME_BIT_POS = 2;
+        static constexpr uint8_t SYNC_FRAME_BIT_POS = 3;
+        static constexpr uint8_t STARTUP_FRAME_BIT_POS = 4;
+    };
+    
+    // Error detection parameters
+    struct ErrorDetection {
+        static constexpr uint8_t MAX_CONSECUTIVE_ERRORS = 3;    // Maximum consecutive errors
+        static constexpr uint16_t ERROR_RECOVERY_CYCLES = 2;    // Cycles needed for error recovery
+        static constexpr uint32_t TIMEOUT_NS = 1000000;        // 1ms timeout
+        
+        // Error types
+        enum class ErrorType : uint8_t {
+            NONE = 0,
+            HEADER_CRC = 1,
+            FRAME_CRC = 2,
+            FRAME_LENGTH = 3,
+            SYNC_ERROR = 4,
+            TIMEOUT = 5
+        };
+    };
+    
+    // Debug and monitoring
+    struct Debug {
+        static constexpr bool ENABLE_DEBUG = true;         // Enable debug output
+        static constexpr bool ENABLE_TIMING_CHECK = true;  // Enable timing validation
+        static constexpr bool LOG_ERRORS = true;           // Log error details
+        
+        // Debug helper functions
+        static void PrintTimingInfo(uint32_t bit_time_ns) {
+            if (ENABLE_DEBUG) {
+                Serial.printf("Bit Time: %lu ns\n", bit_time_ns);
+                Serial.printf("Sample Point: %lu ns\n", Timing::SAMPLE_POINT_NS);
+                Serial.printf("Min Sync Width: %lu ns\n", Timing::MIN_SYNC_WIDTH_NS);
+            }
+        }
+        
+        static void LogError(ErrorDetection::ErrorType error, uint16_t frame_id) {
+            if (LOG_ERRORS) {
+                Serial.print("Error in frame ");
+                Serial.print(frame_id);
+                Serial.print(": ");
+                switch (error) {
+                    case ErrorDetection::ErrorType::HEADER_CRC:
+                        Serial.println("Header CRC mismatch");
+                        break;
+                    case ErrorDetection::ErrorType::FRAME_CRC:
+                        Serial.println("Frame CRC mismatch");
+                        break;
+                    // ... handle other error types ...
+                }
+            }
+        }
+    };
+}
+
+#endif // TEENSY_FLEXRAY_PARAMETERS_H

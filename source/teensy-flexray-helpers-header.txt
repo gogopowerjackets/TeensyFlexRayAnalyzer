@@ -1,0 +1,166 @@
+#ifndef TEENSY_FLEXRAY_HELPERS_H
+#define TEENSY_FLEXRAY_HELPERS_H
+
+#include <Arduino.h>
+#include <vector>
+#include <algorithm>
+
+// Forward declaration for Frame structure
+struct Frame {
+    int64_t mStartingSampleInclusive;
+    int64_t mEndingSampleInclusive;
+    uint64_t mData1;
+    uint64_t mData2;
+    uint8_t mType;
+    uint8_t mFlags;
+};
+
+// Wrapper for frame sorting with timing information
+struct FrameSortingWrapper {
+    Frame f;
+    
+    // Comparison operator for sorting based on start time
+    bool operator<(const FrameSortingWrapper& other) const {
+        return f.mStartingSampleInclusive < other.f.mStartingSampleInclusive;
+    }
+};
+
+// Core helper class with static utility functions
+class FlexRayHelpers {
+public:
+    // Conversion between integers and boolean vectors
+    static std::vector<bool> ToBoolVector(uint64_t input, uint8_t num_bits);
+    static uint64_t BoolVectorToInt(const std::vector<bool>& input, 
+                                  uint64_t start_index, 
+                                  uint8_t num_bits);
+    
+    // FlexRay byte sequence handling
+    static std::vector<bool> ExtendByteSequence(const std::vector<bool>& vec);
+    
+    // CRC calculation
+    static uint16_t CalculateCRC(const std::vector<bool>& input,
+                               uint32_t init,
+                               uint32_t polynomial,
+                               uint8_t num_bits);
+    
+    // Timing helpers
+    static uint64_t GetMicros() {
+        static uint32_t overflow_count = 0;
+        static uint32_t last_micros = 0;
+        uint32_t current = micros();
+        
+        if (current < last_micros) {
+            overflow_count++;
+        }
+        last_micros = current;
+        
+        return (static_cast<uint64_t>(overflow_count) << 32) | current;
+    }
+    
+    // Bit manipulation helpers
+    static inline uint8_t ReverseBits(uint8_t value) {
+        value = ((value & 0xF0) >> 4) | ((value & 0x0F) << 4);
+        value = ((value & 0xCC) >> 2) | ((value & 0x33) << 2);
+        value = ((value & 0xAA) >> 1) | ((value & 0x55) << 1);
+        return value;
+    }
+    
+    static inline uint16_t ReverseBits16(uint16_t value) {
+        value = ((value & 0xFF00) >> 8) | ((value & 0x00FF) << 8);
+        value = ((value & 0xF0F0) >> 4) | ((value & 0x0F0F) << 4);
+        value = ((value & 0xCCCC) >> 2) | ((value & 0x3333) << 2);
+        value = ((value & 0xAAAA) >> 1) | ((value & 0x5555) << 1);
+        return value;
+    }
+    
+    // Vector operation helpers
+    template<typename T>
+    static void VectorAppend(std::vector<T>& dest, const std::vector<T>& src) {
+        dest.insert(dest.end(), src.begin(), src.end());
+    }
+    
+    // Debug helpers
+    static void PrintBitVector(const std::vector<bool>& bits, Print& output = Serial) {
+        for (bool bit : bits) {
+            output.print(bit ? '1' : '0');
+        }
+        output.println();
+    }
+    
+    static void PrintHexBuffer(const uint8_t* buffer, 
+                             size_t length, 
+                             Print& output = Serial) {
+        for (size_t i = 0; i < length; i++) {
+            if (buffer[i] < 0x10) output.print('0');
+            output.print(buffer[i], HEX);
+            output.print(' ');
+            if ((i + 1) % 16 == 0) output.println();
+        }
+        output.println();
+    }
+
+protected:
+    // CRC lookup table management
+    static void InitializeCRCTable(uint32_t polynomial, uint8_t num_bits);
+    static uint16_t* GetCRCTable(uint8_t num_bits);
+
+private:
+    // Prevent instantiation
+    FlexRayHelpers() = delete;
+    
+    // Static CRC lookup tables
+    static uint16_t crc11_table[256];
+    static uint32_t crc24_table[256];
+    static bool tables_initialized;
+};
+
+// Constants for CRC calculation
+namespace FlexRayCRC {
+    constexpr uint32_t CRC11_POLYNOMIAL = 0xB85;
+    constexpr uint32_t CRC11_INIT = 0x01A;
+    constexpr uint8_t CRC11_BITS = 11;
+    
+    constexpr uint32_t CRC24_POLYNOMIAL = 0x5D6DCB;
+    constexpr uint32_t CRC24_INIT = 0xFEDCBA;
+    constexpr uint8_t CRC24_BITS = 24;
+}
+
+// Template for safe array access
+template<typename T, size_t N>
+class SafeArray {
+public:
+    T& operator[](size_t index) {
+        return (index < N) ? data[index] : data[N-1];
+    }
+    
+    const T& operator[](size_t index) const {
+        return (index < N) ? data[index] : data[N-1];
+    }
+    
+    static constexpr size_t size() { return N; }
+    
+private:
+    T data[N];
+};
+
+// Utility class for bit manipulation
+class BitManipulator {
+public:
+    static inline uint64_t SetBit(uint64_t value, uint8_t position) {
+        return value | (1ULL << position);
+    }
+    
+    static inline uint64_t ClearBit(uint64_t value, uint8_t position) {
+        return value & ~(1ULL << position);
+    }
+    
+    static inline bool GetBit(uint64_t value, uint8_t position) {
+        return (value >> position) & 1;
+    }
+    
+    static inline uint64_t SetBitValue(uint64_t value, uint8_t position, bool bit) {
+        return bit ? SetBit(value, position) : ClearBit(value, position);
+    }
+};
+
+#endif // TEENSY_FLEXRAY_HELPERS_H

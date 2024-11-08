@@ -1,0 +1,228 @@
+#ifndef TEENSY_ANALYZER_HELPERS_H
+#define TEENSY_ANALYZER_HELPERS_H
+
+#include <Arduino.h>
+#include <SD.h>
+#include <string.h>
+
+// Forward declarations
+enum DisplayBase {
+    DISPLAY_ASCII,
+    DISPLAY_DECIMAL,
+    DISPLAY_HEXADECIMAL,
+    DISPLAY_BINARY
+};
+
+enum ShiftOrder {
+    MSB_FIRST,
+    LSB_FIRST
+};
+
+typedef bool BitState;
+
+class TeensyAnalyzerHelpers {
+public:
+    // Bit manipulation helpers
+    static bool IsEven(uint64_t value) {
+        return (value & 1) == 0;
+    }
+    
+    static bool IsOdd(uint64_t value) {
+        return (value & 1) == 1;
+    }
+    
+    static uint32_t GetOnesCount(uint64_t value) {
+        uint32_t count = 0;
+        while (value) {
+            count += value & 1;
+            value >>= 1;
+        }
+        return count;
+    }
+    
+    static uint32_t Diff32(uint32_t a, uint32_t b) {
+        return (a > b) ? (a - b) : (b - a);
+    }
+    
+    // String conversion helpers
+    static void GetNumberString(uint64_t number, DisplayBase display_base, 
+                              uint32_t num_data_bits, char* result_string, 
+                              uint32_t result_string_max_length) {
+        switch (display_base) {
+            case DISPLAY_ASCII:
+                snprintf(result_string, result_string_max_length, "%c", 
+                        (char)(number & 0xFF));
+                break;
+                
+            case DISPLAY_DECIMAL:
+                snprintf(result_string, result_string_max_length, "%lu", 
+                        (unsigned long)number);
+                break;
+                
+            case DISPLAY_HEXADECIMAL:
+                if (num_data_bits <= 8)
+                    snprintf(result_string, result_string_max_length, "0x%02X", 
+                            (unsigned int)(number & 0xFF));
+                else if (num_data_bits <= 16)
+                    snprintf(result_string, result_string_max_length, "0x%04X", 
+                            (unsigned int)(number & 0xFFFF));
+                else
+                    snprintf(result_string, result_string_max_length, "0x%08lX", 
+                            (unsigned long)(number & 0xFFFFFFFF));
+                break;
+                
+            case DISPLAY_BINARY:
+                result_string[0] = '0';
+                result_string[1] = 'b';
+                for (int i = 0; i < num_data_bits && i < result_string_max_length - 3; i++) {
+                    result_string[i + 2] = ((number >> (num_data_bits - 1 - i)) & 1) + '0';
+                }
+                result_string[num_data_bits + 2] = '\0';
+                break;
+        }
+    }
+    
+    static void GetTimeString(uint64_t sample, uint64_t trigger_sample, 
+                            uint32_t sample_rate_hz, char* result_string, 
+                            uint32_t result_string_max_length) {
+        double time_ms = (double)(sample - trigger_sample) / sample_rate_hz * 1000.0;
+        snprintf(result_string, result_string_max_length, "%.3f ms", time_ms);
+    }
+    
+    // File handling helpers
+    static File StartFile(const char* file_name, bool is_binary = false) {
+        if (!SD.begin(BUILTIN_SDCARD)) {
+            return File();
+        }
+        return SD.open(file_name, FILE_WRITE);
+    }
+    
+    static void AppendToFile(const uint8_t* data, uint32_t data_length, File& file) {
+        if (file) {
+            file.write(data, data_length);
+        }
+    }
+    
+    static void EndFile(File& file) {
+        if (file) {
+            file.close();
+        }
+    }
+    
+    // Signed number conversion
+    static int64_t ConvertToSignedNumber(uint64_t number, uint32_t num_bits) {
+        if (num_bits == 0 || num_bits > 64)
+            return 0;
+            
+        uint64_t mask = (1ULL << (num_bits - 1));
+        if (number & mask) {
+            return -((int64_t)((~number & ((1ULL << num_bits) - 1)) + 1));
+        }
+        return number;
+    }
+};
+
+// Clock Generator for timing control
+class TeensyClockGenerator {
+public:
+    TeensyClockGenerator() : 
+        mPeriodMicros(0),
+        mLastToggle(0) {}
+    
+    void Init(double target_frequency, uint32_t sample_rate_hz) {
+        mPeriodMicros = 1000000.0 / target_frequency;
+        mLastToggle = micros();
+    }
+    
+    uint32_t AdvanceByHalfPeriod(double multiple = 1.0) {
+        uint32_t delay_micros = mPeriodMicros * multiple / 2;
+        uint32_t current_time = micros();
+        
+        if (current_time - mLastToggle < delay_micros) {
+            delayMicroseconds(delay_micros - (current_time - mLastToggle));
+        }
+        
+        mLastToggle = micros();
+        return delay_micros;
+    }
+    
+    uint32_t AdvanceByTimeS(double time_s) {
+        uint32_t delay_micros = time_s * 1000000;
+        delayMicroseconds(delay_micros);
+        return delay_micros;
+    }
+
+private:
+    uint32_t mPeriodMicros;
+    uint32_t mLastToggle;
+};
+
+// Bit manipulation helpers
+class TeensyBitExtractor {
+public:
+    TeensyBitExtractor(uint64_t data, ShiftOrder shift_order, uint32_t num_bits) :
+        mData(data),
+        mShiftOrder(shift_order),
+        mNumBits(num_bits),
+        mCurrentBit(0) {}
+    
+    BitState GetNextBit() {
+        if (mCurrentBit >= mNumBits)
+            return false;
+            
+        BitState bit;
+        if (mShiftOrder == MSB_FIRST) {
+            bit = (mData >> (mNumBits - 1 - mCurrentBit)) & 1;
+        } else {
+            bit = (mData >> mCurrentBit) & 1;
+        }
+        
+        mCurrentBit++;
+        return bit;
+    }
+
+private:
+    uint64_t mData;
+    ShiftOrder mShiftOrder;
+    uint32_t mNumBits;
+    uint32_t mCurrentBit;
+};
+
+// Data builder for bit assembly
+class TeensyDataBuilder {
+public:
+    TeensyDataBuilder() : 
+        mData(nullptr),
+        mShiftOrder(MSB_FIRST),
+        mNumBits(0),
+        mCurrentBit(0) {}
+    
+    void Reset(uint64_t* data, ShiftOrder shift_order, uint32_t num_bits) {
+        mData = data;
+        mShiftOrder = shift_order;
+        mNumBits = num_bits;
+        mCurrentBit = 0;
+        *mData = 0;
+    }
+    
+    void AddBit(BitState bit) {
+        if (mCurrentBit >= mNumBits || !mData)
+            return;
+            
+        if (mShiftOrder == MSB_FIRST) {
+            *mData |= ((uint64_t)bit << (mNumBits - 1 - mCurrentBit));
+        } else {
+            *mData |= ((uint64_t)bit << mCurrentBit);
+        }
+        
+        mCurrentBit++;
+    }
+
+private:
+    uint64_t* mData;
+    ShiftOrder mShiftOrder;
+    uint32_t mNumBits;
+    uint32_t mCurrentBit;
+};
+
+#endif // TEENSY_ANALYZER_HELPERS_H

@@ -1,0 +1,178 @@
+#ifndef TEENSY_FLEXRAY_HELPERS_H
+#define TEENSY_FLEXRAY_HELPERS_H
+
+#include <Arduino.h>
+#include <vector>
+
+class FlexRayHelpers {
+public:
+    // Conversion between integers and bit vectors
+    static std::vector<bool> ToBoolVector(uint64_t input, uint8_t num_bits) {
+        std::vector<bool> result;
+        result.reserve(num_bits);  // Pre-allocate for efficiency
+        
+        // Use fast bit manipulation
+        for (uint8_t i = num_bits; i > 0; i--) {
+            result.push_back((input >> (i - 1)) & 1);
+        }
+        
+        return result;
+    }
+    
+    static uint64_t BoolVectorToInt(const std::vector<bool>& input, 
+                                  uint64_t start_index, 
+                                  uint8_t num_bits) {
+        uint64_t result = 0;
+        
+        // Bounds check
+        if (start_index + num_bits > input.size()) {
+            return 0;
+        }
+        
+        // Use shift operations for efficiency
+        for (uint8_t i = 0; i < num_bits; i++) {
+            result = (result << 1) | (input[start_index + i] ? 1 : 0);
+        }
+        
+        return result;
+    }
+    
+    // Byte sequence handling
+    static std::vector<bool> ExtendByteSequence(const std::vector<bool>& vec) {
+        std::vector<bool> result;
+        result.reserve((vec.size() * 10) / 8);  // Reserve space for BSS + data
+        
+        for (size_t i = 0; i < vec.size(); i++) {
+            // Add Byte Start Sequence (BSS) before each byte
+            if (i % 8 == 0) {
+                result.push_back(true);   // BSS high bit
+                result.push_back(false);  // BSS low bit
+            }
+            // Add data bit
+            result.push_back(vec[i]);
+        }
+        
+        return result;
+    }
+    
+    // CRC calculation with lookup table optimization
+    static uint16_t CalculateCRC(const std::vector<bool>& input, 
+                               uint32_t init, 
+                               uint32_t polynomial, 
+                               uint8_t num_bits) {
+        static bool tables_initialized = false;
+        static uint16_t crc11_table[256];
+        static uint32_t crc24_table[256];
+        
+        // Initialize lookup tables if needed
+        if (!tables_initialized) {
+            InitializeCRCTables(polynomial, num_bits);
+            tables_initialized = true;
+        }
+        
+        // Choose appropriate table based on num_bits
+        const void* table = (num_bits == 11) ? 
+                          (void*)crc11_table : (void*)crc24_table;
+        
+        // Calculate CRC using lookup table
+        uint32_t crc = init;
+        uint32_t mask = (1ULL << num_bits) - 1;
+        
+        // Process 8 bits at a time using lookup table
+        uint8_t current_byte = 0;
+        uint8_t bit_count = 0;
+        
+        for (bool bit : input) {
+            current_byte = (current_byte << 1) | (bit ? 1 : 0);
+            bit_count++;
+            
+            if (bit_count == 8) {
+                if (num_bits == 11) {
+                    crc = ((crc << 8) | current_byte) ^ 
+                          ((uint16_t*)table)[crc >> (num_bits - 8)];
+                } else {
+                    crc = ((crc << 8) | current_byte) ^ 
+                          ((uint32_t*)table)[crc >> (num_bits - 8)];
+                }
+                crc &= mask;
+                current_byte = 0;
+                bit_count = 0;
+            }
+        }
+        
+        // Handle remaining bits
+        if (bit_count > 0) {
+            current_byte <<= (8 - bit_count);
+            if (num_bits == 11) {
+                crc = ((crc << 8) | current_byte) ^ 
+                      ((uint16_t*)table)[crc >> (num_bits - 8)];
+            } else {
+                crc = ((crc << 8) | current_byte) ^ 
+                      ((uint32_t*)table)[crc >> (num_bits - 8)];
+            }
+            crc &= mask;
+        }
+        
+        return crc;
+    }
+    
+    // Debug helpers
+    static void PrintBitVector(const std::vector<bool>& bits) {
+        for (bool bit : bits) {
+            Serial.print(bit ? '1' : '0');
+        }
+        Serial.println();
+    }
+    
+    static void PrintHexBuffer(const uint8_t* buffer, size_t length) {
+        for (size_t i = 0; i < length; i++) {
+            if (buffer[i] < 0x10) Serial.print('0');
+            Serial.print(buffer[i], HEX);
+            Serial.print(' ');
+            if ((i + 1) % 16 == 0) Serial.println();
+        }
+        Serial.println();
+    }
+
+private:
+    // CRC table initialization
+    static void InitializeCRCTables(uint32_t polynomial, uint8_t num_bits) {
+        uint32_t mask = (1ULL << num_bits) - 1;
+        
+        for (int i = 0; i < 256; i++) {
+            uint32_t crc = i;
+            
+            for (int j = 0; j < 8; j++) {
+                if (crc & (1ULL << (num_bits - 1))) {
+                    crc = ((crc << 1) ^ polynomial) & mask;
+                } else {
+                    crc = (crc << 1) & mask;
+                }
+            }
+            
+            if (num_bits == 11) {
+                ((uint16_t*)crc11_table)[i] = crc;
+            } else {
+                crc24_table[i] = crc;
+            }
+        }
+    }
+};
+
+// Inline utility functions for time critical operations
+inline uint8_t ReverseBits(uint8_t b) {
+    b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
+    b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
+    b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
+    return b;
+}
+
+inline uint16_t ReverseBits16(uint16_t x) {
+    x = ((x & 0xFF00) >> 8) | ((x & 0x00FF) << 8);
+    x = ((x & 0xF0F0) >> 4) | ((x & 0x0F0F) << 4);
+    x = ((x & 0xCCCC) >> 2) | ((x & 0x3333) << 2);
+    x = ((x & 0xAAAA) >> 1) | ((x & 0x5555) << 1);
+    return x;
+}
+
+#endif // TEENSY_FLEXRAY_HELPERS_H
